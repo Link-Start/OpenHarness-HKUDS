@@ -9,6 +9,7 @@ from openharness.tools.config_tool import ConfigTool
 from openharness.tools.cron_create_tool import CronCreateTool
 from openharness.tools.cron_delete_tool import CronDeleteTool
 from openharness.tools.cron_list_tool import CronListTool
+from openharness.tools.cron_toggle_tool import CronToggleTool
 from openharness.tools.enter_plan_mode_tool import EnterPlanModeTool
 from openharness.tools.enter_worktree_tool import EnterWorktreeTool
 from openharness.tools.exit_plan_mode_tool import ExitPlanModeTool
@@ -18,6 +19,8 @@ from openharness.tools.file_read_tool import FileReadTool
 from openharness.tools.file_write_tool import FileWriteTool
 from openharness.tools.glob_tool import GlobTool
 from openharness.tools.grep_tool import GrepTool
+from openharness.tools.image_generation_tool import ImageGenerationTool
+from openharness.tools.image_to_text_tool import ImageToTextTool
 from openharness.tools.list_mcp_resources_tool import ListMcpResourcesTool
 from openharness.tools.lsp_tool import LspTool
 from openharness.tools.mcp_auth_tool import McpAuthTool
@@ -56,6 +59,8 @@ def create_default_tool_registry(mcp_manager=None) -> ToolRegistry:
         McpAuthTool(),
         GlobTool(),
         GrepTool(),
+        ImageToTextTool(),
+        ImageGenerationTool(),
         SkillTool(),
         ToolSearchTool(),
         WebFetchTool(),
@@ -71,6 +76,7 @@ def create_default_tool_registry(mcp_manager=None) -> ToolRegistry:
         CronCreateTool(),
         CronListTool(),
         CronDeleteTool(),
+        CronToggleTool(),
         RemoteTriggerTool(),
         TaskCreateTool(),
         TaskGetTool(),

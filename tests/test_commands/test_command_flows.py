@@ -57,12 +57,13 @@ def _build_context(tmp_path: Path) -> CommandContext:
 
 def _write_fixture_plugin(root: Path) -> Path:
     plugin_dir = root / "fixture-plugin"
-    (plugin_dir / "skills").mkdir(parents=True)
+    fixture_skill_dir = plugin_dir / "skills" / "fixture"
+    fixture_skill_dir.mkdir(parents=True)
     (plugin_dir / "plugin.json").write_text(
         json.dumps({"name": "fixture-plugin", "version": "1.0.0", "description": "Fixture plugin"}),
         encoding="utf-8",
     )
-    (plugin_dir / "skills" / "fixture.md").write_text(
+    (fixture_skill_dir / "SKILL.md").write_text(
         "# FixtureSkill\nFixture command plugin content.\n",
         encoding="utf-8",
     )
@@ -150,3 +151,22 @@ async def test_plugin_command_lifecycle_flow(tmp_path: Path, monkeypatch):
     uninstall_command, uninstall_args = registry.lookup("/plugin uninstall fixture-plugin")
     uninstall_result = await uninstall_command.handler(uninstall_args, context)
     assert "Uninstalled plugin" in uninstall_result.message
+
+
+@pytest.mark.asyncio
+async def test_plugin_command_rejects_traversal_uninstall_without_deleting_sibling(
+    tmp_path: Path, monkeypatch
+):
+    monkeypatch.setenv("OPENHARNESS_CONFIG_DIR", str(tmp_path / "config"))
+    registry = create_default_command_registry()
+    context = _build_context(tmp_path)
+    victim = tmp_path / "victim"
+    victim.mkdir()
+    (victim / "marker.txt").write_text("keep", encoding="utf-8")
+
+    uninstall_command, uninstall_args = registry.lookup("/plugin uninstall ../../victim")
+    uninstall_result = await uninstall_command.handler(uninstall_args, context)
+
+    assert "Invalid plugin name" in uninstall_result.message
+    assert victim.exists()
+    assert (victim / "marker.txt").read_text(encoding="utf-8") == "keep"

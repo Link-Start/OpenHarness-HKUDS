@@ -1,14 +1,18 @@
-import React, {useEffect, useMemo, useState} from 'react';
+import React, {useDeferredValue, useEffect, useMemo, useRef, useState} from 'react';
 import {Box, Text, useApp, useInput} from 'ink';
 
+import {readClipboardImage, type ImageAttachment} from './clipboardImage.js';
 import {CommandPicker} from './components/CommandPicker.js';
 import {ConversationView} from './components/ConversationView.js';
 import {ModalHost} from './components/ModalHost.js';
 import {PromptInput} from './components/PromptInput.js';
 import {SelectModal, type SelectOption} from './components/SelectModal.js';
 import {StatusBar} from './components/StatusBar.js';
+import {SwarmPanel} from './components/SwarmPanel.js';
+import {TodoPanel} from './components/TodoPanel.js';
 import {useBackendSession} from './hooks/useBackendSession.js';
-import type {FrontendConfig} from './types.js';
+import {ThemeProvider, useTheme} from './theme/ThemeContext.js';
+import type {FrontendConfig, ImageAttachmentPayload} from './types.js';
 
 const rawReturnSubmit = process.env.OPENHARNESS_FRONTEND_RAW_RETURN === '1';
 const scriptedSteps = (() => {
@@ -24,11 +28,20 @@ const scriptedSteps = (() => {
 	}
 })();
 
-const PERMISSION_MODES: SelectOption[] = [
-	{value: 'default', label: 'Default', description: 'Ask before write/execute operations'},
-	{value: 'full_auto', label: 'Auto', description: 'Allow all tools automatically'},
-	{value: 'plan', label: 'Plan Mode', description: 'Block all write operations'},
-];
+const SELECTABLE_COMMANDS = new Set([
+	'/provider',
+	'/model',
+	'/theme',
+	'/output-style',
+	'/permissions',
+	'/resume',
+	'/effort',
+	'/passes',
+	'/turns',
+	'/fast',
+	'/vim',
+	'/voice',
+]);
 
 type SelectModalState = {
 	title: string;
@@ -37,21 +50,90 @@ type SelectModalState = {
 } | null;
 
 export function App({config}: {config: FrontendConfig}): React.JSX.Element {
+	const initialTheme = String((config as Record<string, unknown>).theme ?? 'default');
+	return (
+		<ThemeProvider initialTheme={initialTheme}>
+			<AppInner config={config} />
+		</ThemeProvider>
+	);
+}
+
+function AppInner({config}: {config: FrontendConfig}): React.JSX.Element {
 	const {exit} = useApp();
+	const {theme, setThemeName} = useTheme();
 	const [input, setInput] = useState('');
 	const [modalInput, setModalInput] = useState('');
 	const [history, setHistory] = useState<string[]>([]);
 	const [historyIndex, setHistoryIndex] = useState(-1);
+	const [imageAttachments, setImageAttachments] = useState<ImageAttachment[]>([]);
+	const [clipboardStatus, setClipboardStatus] = useState<string | null>(null);
+	const [lastEscapeAt, setLastEscapeAt] = useState(0);
 	const [scriptIndex, setScriptIndex] = useState(0);
 	const [pickerIndex, setPickerIndex] = useState(0);
 	const [selectModal, setSelectModal] = useState<SelectModalState>(null);
 	const [selectIndex, setSelectIndex] = useState(0);
 	const session = useBackendSession(config, () => exit());
+	const deferredTranscript = useDeferredValue(session.transcript);
+	const deferredAssistantBuffer = useDeferredValue(session.assistantBuffer);
+	const deferredStatus = useDeferredValue(session.status);
+	const deferredTasks = useDeferredValue(session.tasks);
+	const deferredTodoMarkdown = useDeferredValue(session.todoMarkdown);
+	const deferredSwarmTeammates = useDeferredValue(session.swarmTeammates);
+	const deferredSwarmNotifications = useDeferredValue(session.swarmNotifications);
+	const clipboardStatusTimerRef = useRef<NodeJS.Timeout | null>(null);
+
+	useEffect(() => {
+		const nextTheme = session.status.theme;
+		if (typeof nextTheme === 'string' && nextTheme) {
+			setThemeName(nextTheme);
+		}
+	}, [session.status.theme, setThemeName]);
+
+	useEffect(() => {
+		return () => {
+			if (clipboardStatusTimerRef.current) {
+				clearTimeout(clipboardStatusTimerRef.current);
+			}
+		};
+	}, []);
+
+	const setTemporaryClipboardStatus = (message: string): void => {
+		setClipboardStatus(message);
+		if (clipboardStatusTimerRef.current) {
+			clearTimeout(clipboardStatusTimerRef.current);
+		}
+		clipboardStatusTimerRef.current = setTimeout(() => {
+			setClipboardStatus(null);
+			clipboardStatusTimerRef.current = null;
+		}, 2500);
+	};
+
+	const attachClipboardImage = (): void => {
+		void (async () => {
+			const image = await readClipboardImage();
+			if (!image) {
+				setTemporaryClipboardStatus('No image found in clipboard');
+				return;
+			}
+			setImageAttachments((items) => [...items, image]);
+			setTemporaryClipboardStatus(`Attached ${image.label}`);
+		})().catch((error: unknown) => {
+			const message = error instanceof Error ? error.message : String(error);
+			setTemporaryClipboardStatus(`Clipboard image unavailable: ${message}`);
+		});
+	};
+
+	const imagePayloads = (): ImageAttachmentPayload[] =>
+		imageAttachments.map((image) => ({
+			media_type: image.media_type,
+			data: image.data,
+			source_path: image.source_path,
+		}));
 
 	// Current tool name for spinner
 	const currentToolName = useMemo(() => {
-		for (let i = session.transcript.length - 1; i >= 0; i--) {
-			const item = session.transcript[i];
+		for (let i = deferredTranscript.length - 1; i >= 0; i--) {
+			const item = deferredTranscript[i];
 			if (item.role === 'tool') {
 				return item.tool_name ?? 'tool';
 			}
@@ -60,7 +142,7 @@ export function App({config}: {config: FrontendConfig}): React.JSX.Element {
 			}
 		}
 		return undefined;
-	}, [session.transcript]);
+	}, [deferredTranscript]);
 
 	// Command hints
 	const commandHints = useMemo(() => {
@@ -72,6 +154,7 @@ export function App({config}: {config: FrontendConfig}): React.JSX.Element {
 	}, [session.commands, input]);
 
 	const showPicker = commandHints.length > 0 && !session.busy && !session.modal && !selectModal;
+	const outputStyle = String(session.status.output_style ?? 'default');
 
 	useEffect(() => {
 		setPickerIndex(0);
@@ -87,12 +170,13 @@ export function App({config}: {config: FrontendConfig}): React.JSX.Element {
 			session.setSelectRequest(null);
 			return;
 		}
-		setSelectIndex(0);
+		const initialIndex = req.options.findIndex((option) => option.active);
+		setSelectIndex(initialIndex >= 0 ? initialIndex : 0);
 		setSelectModal({
 			title: req.title,
-			options: req.options.map((o) => ({value: o.value, label: o.label, description: o.description})),
+			options: req.options.map((o) => ({value: o.value, label: o.label, description: o.description, active: o.active})),
 			onSelect: (value) => {
-				session.sendRequest({type: 'submit_line', line: `${req.submitPrefix}${value}`});
+				session.sendRequest({type: 'apply_select_command', command: req.command, value});
 				session.setBusy(true);
 				setSelectModal(null);
 			},
@@ -104,24 +188,14 @@ export function App({config}: {config: FrontendConfig}): React.JSX.Element {
 	const handleCommand = (cmd: string): boolean => {
 		const trimmed = cmd.trim();
 
+		if (SELECTABLE_COMMANDS.has(trimmed)) {
+			session.sendRequest({type: 'select_command', command: trimmed.slice(1)});
+			return true;
+		}
+
 		// /permissions → show mode picker
 		if (trimmed === '/permissions' || trimmed === '/permissions show') {
-			const currentMode = String(session.status.permission_mode ?? 'default');
-			const options = PERMISSION_MODES.map((opt) => ({
-				...opt,
-				active: opt.value === currentMode,
-			}));
-			const initialIndex = options.findIndex((o) => o.active);
-			setSelectIndex(initialIndex >= 0 ? initialIndex : 0);
-			setSelectModal({
-				title: 'Permission Mode',
-				options,
-				onSelect: (value) => {
-					session.sendRequest({type: 'submit_line', line: `/permissions set ${value}`});
-					session.setBusy(true);
-					setSelectModal(null);
-				},
-			});
+			session.sendRequest({type: 'select_command', command: 'permissions'});
 			return true;
 		}
 
@@ -139,7 +213,7 @@ export function App({config}: {config: FrontendConfig}): React.JSX.Element {
 
 		// /resume → request session list from backend (will trigger select_request)
 		if (trimmed === '/resume') {
-			session.sendRequest({type: 'list_sessions'});
+			session.sendRequest({type: 'select_command', command: 'resume'});
 			return true;
 		}
 
@@ -147,10 +221,28 @@ export function App({config}: {config: FrontendConfig}): React.JSX.Element {
 	};
 
 	useInput((chunk, key) => {
-		// Ctrl+C → exit
+		const isPaste = chunk.length > 1 && !key.ctrl && !key.meta;
+		const isEscape = key.escape || chunk === '\u001B';
+
+		// Ctrl+C interrupts a running turn; when idle it exits the TUI.
 		if (key.ctrl && chunk === 'c') {
+			if (session.busy) {
+				session.sendRequest({type: 'interrupt'});
+				session.setBusyLabel('Stopping current operation...');
+				return;
+			}
 			session.sendRequest({type: 'shutdown'});
 			exit();
+			return;
+		}
+
+		if (!session.busy && key.ctrl && chunk === 'v') {
+			attachClipboardImage();
+			return;
+		}
+
+		// Let ink-text-input handle pasted text directly.
+		if (isPaste) {
 			return;
 		}
 
@@ -205,7 +297,7 @@ export function App({config}: {config: FrontendConfig}): React.JSX.Element {
 			}
 		}
 
-		// --- Permission modal ---
+		// --- Permission modal (MUST be before busy check — modal appears while busy) ---
 		if (session.modal?.kind === 'permission') {
 			if (chunk.toLowerCase() === 'y') {
 				session.sendRequest({
@@ -216,7 +308,7 @@ export function App({config}: {config: FrontendConfig}): React.JSX.Element {
 				session.setModal(null);
 				return;
 			}
-			if (chunk.toLowerCase() === 'n' || key.escape) {
+			if (chunk.toLowerCase() === 'n' || isEscape) {
 				session.sendRequest({
 					type: 'permission_response',
 					request_id: session.modal.request_id,
@@ -228,8 +320,61 @@ export function App({config}: {config: FrontendConfig}): React.JSX.Element {
 			return;
 		}
 
+		// --- Edit diff modal (also appears while busy) ---
+		if (session.modal?.kind === 'edit_diff') {
+			if (chunk.toLowerCase() === 'y') {
+				session.sendRequest({
+					type: 'permission_response',
+					request_id: session.modal.request_id,
+					allowed: true,
+					permission_reply: 'once',
+				});
+				session.setModal(null);
+				return;
+			}
+			if (chunk.toLowerCase() === 'a') {
+				session.sendRequest({
+					type: 'permission_response',
+					request_id: session.modal.request_id,
+					allowed: true,
+					permission_reply: 'always',
+				});
+				session.setModal(null);
+				return;
+			}
+			if (chunk.toLowerCase() === 'n' || isEscape) {
+				session.sendRequest({
+					type: 'permission_response',
+					request_id: session.modal.request_id,
+					allowed: false,
+					permission_reply: 'reject',
+				});
+				session.setModal(null);
+				return;
+			}
+			return;
+		}
+
+		// --- Question modal (also appears while busy) ---
+		if (session.modal?.kind === 'question') {
+			return; // Let TextInput in ModalHost handle input
+		}
+
+		if (session.busy && isEscape) {
+			session.sendRequest({type: 'interrupt'});
+			session.setBusyLabel('Stopping current operation...');
+			return;
+		}
+
 		// --- Ignore input while busy ---
 		if (session.busy) {
+			return;
+		}
+
+		// Empty-input Tab opens the permission mode picker. This makes leaving
+		// plan mode explicit without requiring users to remember /permissions.
+		if (!showPicker && key.tab && input.trim() === '') {
+			session.sendRequest({type: 'select_command', command: 'permissions'});
 			return;
 		}
 
@@ -256,14 +401,31 @@ export function App({config}: {config: FrontendConfig}): React.JSX.Element {
 			if (key.tab) {
 				const selected = commandHints[pickerIndex];
 				if (selected) {
-					setInput(selected + ' ');
+					// Complete to the selected command with no trailing space —
+					// the user can hit Enter immediately to run it, or keep
+					// typing to add args. The trailing space made it look like
+					// Tab was "committing" with a token, which broke the flow.
+					setInput(selected);
 				}
 				return;
 			}
-			if (key.escape) {
+			if (isEscape) {
 				setInput('');
 				return;
 			}
+		}
+
+		if (isEscape) {
+			const now = Date.now();
+			if ((input || imageAttachments.length > 0) && now - lastEscapeAt < 500) {
+				setInput('');
+				setImageAttachments([]);
+				setHistoryIndex(-1);
+				setLastEscapeAt(0);
+				return;
+			}
+			setLastEscapeAt(now);
+			return;
 		}
 
 		// --- History navigation ---
@@ -282,11 +444,8 @@ export function App({config}: {config: FrontendConfig}): React.JSX.Element {
 			return;
 		}
 
-		// --- Submit on Enter ---
-		if (!showPicker && key.return && input.trim()) {
-			onSubmit(input);
-			return;
-		}
+		// Note: normal Enter submission is handled by TextInput's onSubmit in
+		// PromptInput.  Do NOT duplicate it here — that causes double requests.
 	});
 
 	const onSubmit = (value: string): void => {
@@ -300,20 +459,28 @@ export function App({config}: {config: FrontendConfig}): React.JSX.Element {
 			setModalInput('');
 			return;
 		}
-		if (!value.trim() || session.busy) {
+		if ((!value.trim() && imageAttachments.length === 0) || session.busy || !session.ready) {
+			if (session.busy && value.trim() === '/stop') {
+				session.sendRequest({type: 'interrupt'});
+				session.setBusyLabel('Stopping current operation...');
+				setInput('');
+			}
 			return;
 		}
 		// Check if it's an interactive command
-		if (handleCommand(value)) {
+		if (imageAttachments.length === 0 && handleCommand(value)) {
 			setHistory((items) => [...items, value]);
 			setHistoryIndex(-1);
 			setInput('');
 			return;
 		}
-		session.sendRequest({type: 'submit_line', line: value});
-		setHistory((items) => [...items, value]);
+		session.sendRequest({type: 'submit_line', line: value, images: imagePayloads()});
+		if (value.trim()) {
+			setHistory((items) => [...items, value]);
+		}
 		setHistoryIndex(-1);
 		setInput('');
+		setImageAttachments([]);
 		session.setBusy(true);
 	};
 
@@ -338,9 +505,10 @@ export function App({config}: {config: FrontendConfig}): React.JSX.Element {
 			{/* Conversation area */}
 			<Box flexDirection="column" flexGrow={1}>
 				<ConversationView
-					items={session.transcript}
-					assistantBuffer={session.assistantBuffer}
-					showWelcome={true}
+					items={deferredTranscript}
+					assistantBuffer={deferredAssistantBuffer}
+					showWelcome={session.ready && outputStyle !== 'codex'}
+					outputStyle={outputStyle}
 				/>
 			</Box>
 
@@ -368,29 +536,51 @@ export function App({config}: {config: FrontendConfig}): React.JSX.Element {
 				<CommandPicker hints={commandHints} selectedIndex={pickerIndex} />
 			) : null}
 
-			{/* Status bar */}
-			<StatusBar status={session.status} tasks={session.tasks} />
+			{/* Todo panel */}
+			{session.ready && deferredTodoMarkdown ? (
+				<TodoPanel markdown={deferredTodoMarkdown} />
+			) : null}
 
-			{/* Input */}
-			{session.modal || selectModal ? null : (
+			{/* Swarm panel */}
+			{session.ready && (deferredSwarmTeammates.length > 0 || deferredSwarmNotifications.length > 0) ? (
+				<SwarmPanel teammates={deferredSwarmTeammates} notifications={deferredSwarmNotifications} />
+			) : null}
+
+			{/* Status bar (only after backend is ready) */}
+			{session.ready ? (
+				<StatusBar status={deferredStatus} tasks={deferredTasks} activeToolName={session.busy ? currentToolName : undefined} />
+			) : null}
+
+			{/* Input — show loading indicator until backend is ready */}
+			{!session.ready ? (
+				<Box>
+					<Text color={theme.colors.warning}>Connecting to backend...</Text>
+				</Box>
+			) : session.modal || selectModal ? null : (
 				<PromptInput
 					busy={session.busy}
 					input={input}
 					setInput={setInput}
 					onSubmit={onSubmit}
 					toolName={session.busy ? currentToolName : undefined}
+					statusLabel={session.busy ? (session.busyLabel ?? (currentToolName ? `Running ${currentToolName}...` : 'Running agent loop...')) : undefined}
 					suppressSubmit={showPicker}
+					imageAttachmentLabels={imageAttachments.map((image) => image.label)}
+					clipboardStatus={clipboardStatus}
 				/>
 			)}
 
-			{/* Keyboard hints */}
-			{!session.modal && !session.busy && !selectModal ? (
+			{/* Keyboard hints (only after backend is ready) */}
+			{session.ready && !session.modal && !selectModal ? (
 				<Box>
 					<Text dimColor>
-						<Text color="cyan">enter</Text> send{'  '}
-						<Text color="cyan">/</Text> commands{'  '}
-						<Text color="cyan">{'\u2191\u2193'}</Text> history{'  '}
-						<Text color="cyan">ctrl+c</Text> exit
+						<Text color={theme.colors.primary}>shift+enter</Text> newline{'  '}
+						<Text color={theme.colors.primary}>enter</Text> send{'  '}
+						<Text color={theme.colors.primary}>/</Text> commands{'  '}
+						<Text color={theme.colors.primary}>tab</Text> mode{'  '}
+						<Text color={theme.colors.primary}>{'\u2191\u2193'}</Text> history{'  '}
+						<Text color={theme.colors.primary}>{session.busy ? '/stop' : 'esc'}</Text> stop{'  '}
+						<Text color={theme.colors.primary}>ctrl+c</Text> {session.busy ? 'stop' : 'exit'}
 					</Text>
 				</Box>
 			) : null}

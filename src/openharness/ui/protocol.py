@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Any, Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 from openharness.state.app_state import AppState
 from openharness.bridge.manager import BridgeSessionRecord
@@ -12,14 +12,49 @@ from openharness.mcp.types import McpConnectionStatus
 from openharness.tasks.types import TaskRecord
 
 
+class FrontendImageAttachment(BaseModel):
+    """Base64 image payload submitted from the React TUI."""
+
+    media_type: str
+    data: str
+    source_path: str | None = None
+
+    @field_validator("media_type")
+    @classmethod
+    def _validate_media_type(cls, value: str) -> str:
+        if not value.startswith("image/"):
+            raise ValueError("image attachment media_type must start with image/")
+        return value
+
+    @field_validator("data")
+    @classmethod
+    def _validate_data(cls, value: str) -> str:
+        if not value.strip():
+            raise ValueError("image attachment data is required")
+        return value
+
+
 class FrontendRequest(BaseModel):
     """One request sent from the React frontend to the Python backend."""
 
-    type: Literal["submit_line", "permission_response", "question_response", "list_sessions", "shutdown"]
+    type: Literal[
+        "submit_line",
+        "permission_response",
+        "question_response",
+        "list_sessions",
+        "select_command",
+        "apply_select_command",
+        "interrupt",
+        "shutdown",
+    ]
     line: str | None = None
+    command: str | None = None
+    value: str | None = None
     request_id: str | None = None
     allowed: bool | None = None
+    permission_reply: str | None = None
     answer: str | None = None
+    images: list[FrontendImageAttachment] = Field(default_factory=list)
 
 
 class TranscriptItem(BaseModel):
@@ -60,6 +95,7 @@ class BackendEvent(BaseModel):
         "state_snapshot",
         "tasks_snapshot",
         "transcript_item",
+        "compact_progress",
         "assistant_delta",
         "assistant_complete",
         "line_complete",
@@ -68,6 +104,9 @@ class BackendEvent(BaseModel):
         "clear_transcript",
         "modal_request",
         "select_request",
+        "todo_update",
+        "plan_mode_change",
+        "swarm_status",
         "error",
         "shutdown",
     ]
@@ -84,6 +123,16 @@ class BackendEvent(BaseModel):
     tool_input: dict[str, Any] | None = None
     output: str | None = None
     is_error: bool | None = None
+    compact_phase: str | None = None
+    compact_trigger: str | None = None
+    attempt: int | None = None
+    compact_checkpoint: str | None = None
+    compact_metadata: dict[str, Any] | None = None
+    # New fields for enhanced events
+    todo_markdown: str | None = None
+    plan_mode: str | None = None
+    swarm_teammates: list[dict[str, Any]] | None = None
+    swarm_notifications: list[dict[str, Any]] | None = None
 
     @classmethod
     def ready(
@@ -191,6 +240,7 @@ def _format_permission_mode(raw: str) -> str:
 
 __all__ = [
     "BackendEvent",
+    "FrontendImageAttachment",
     "FrontendRequest",
     "TaskSnapshot",
     "TranscriptItem",
